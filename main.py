@@ -19,56 +19,60 @@ PARQUET_FILES = [
 ]
 
 WORKERS = 35
-BATCH_SIZE = 64
 
 POOL = ThreadPoolExecutor(max_workers=WORKERS)
 
+# One shared HfFileSystem instance (auth + session reuse)
+_FS = HfFileSystem()
 
 # ============================================================
-# SEARCH
+# FAST SEARCH (merged best record)
 # ============================================================
 
-def search_phone(phone: str, limit: int):
+def search_phone(phone: str):
 
     con = duckdb.connect()
 
     try:
-        fs = HfFileSystem()
-        con.register_filesystem(fs)
+        con.register_filesystem(_FS)
 
-        con.execute("SET threads=1")
+        # Speed tweaks
+        con.execute("SET threads=4")
+        con.execute("SET enable_progress_bar=false")
+        con.execute("SET preserve_insertion_order=false")
 
+        # MAX() ignores NULLs -> gives best non-empty value per column
         query = """
             SELECT
-                "Number",
-                "Name",
-                "Gender",
-                "Address",
-                "Email"
+                MAX("Number")  AS "Number",
+                MAX("Name")    AS "Name",
+                MAX("Gender")  AS "Gender",
+                MAX("Address") AS "Address",
+                MAX("Email")   AS "Email"
             FROM read_parquet(?, union_by_name=true)
             WHERE CAST("Number" AS VARCHAR) = ?
-            LIMIT ?
         """
 
-        rows = con.execute(
+        row = con.execute(
             query,
-            [PARQUET_FILES, str(phone), int(limit)]
-        ).fetchall()
+            [PARQUET_FILES, str(phone)]
+        ).fetchone()
+
+        if row is None:
+            return []
 
         columns = ["Number", "Name", "Gender", "Address", "Email"]
-        results = []
+        item = dict(zip(columns, row))
 
-        for row in rows:
-            item = dict(zip(columns, row))
+        # If everything is NULL, no match
+        if all(v is None for v in item.values()):
+            return []
 
-            # NULL -> ""
-            for k in columns:
-                if item[k] is None:
-                    item[k] = ""
+        for k in columns:
+            if item[k] is None:
+                item[k] = ""
 
-            results.append(item)
-
-        return results
+        return [item]
 
     finally:
         con.close()
@@ -84,9 +88,8 @@ def root():
         "status": "online",
         "api": "Truecaller API",
         "dataset": DATASET,
-        "files": PARQUET_FILES,
+        "files": len(PARQUET_FILES),
         "workers": WORKERS,
-        "batch_size": BATCH_SIZE,
         "search": "/search?phone=917207000711"
     }
 
@@ -104,7 +107,6 @@ def health():
 @app.get("/search")
 async def search(
     phone: str = Query(..., description="Phone number"),
-    limit: int = Query(20, ge=1, le=100)
 ):
 
     phone = str(phone).strip()
@@ -124,8 +126,7 @@ async def search(
         results = await loop.run_in_executor(
             POOL,
             search_phone,
-            phone,
-            limit
+            phone
         )
 
         return {
