@@ -1,114 +1,90 @@
-from fastapi import FastAPI, Query
-from huggingface_hub import HfFileSystem
-import duckdb
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
+# api/index.py
+import os
+import traceback
+from pathlib import Path
 
-app = FastAPI(title="Num Info API")
+CACHE_DIR = Path("/tmp")
+CACHE_DIR.mkdir(exist_ok=True)
 
-# ============================================================
-# CONFIG
-# ============================================================
+try:
+    from fastapi import FastAPI, Query
+    import duckdb
+    from huggingface_hub import HfFileSystem
+except Exception:
+    traceback.print_exc()
+    raise
 
-DATASET = "bitaimkingfree/num-info-only"
+app = FastAPI()
 
-# Single parquet file
-PARQUET_PATH = "hf://datasets/bitaimkingfree/num-info-only/users_data.parquet"
-
-WORKERS = 100                                   # â¬…ï¸ 35 se 100
-POOL = ThreadPoolExecutor(max_workers=WORKERS)
-
-# One shared HfFileSystem instance
+HF_PARQUET = "hf://datasets/bitaimkingfree/num-info-only/users_data.parquet"
 _FS = HfFileSystem()
 
-
-# ============================================================
-# SEARCH
-# ============================================================
-
-def search_phone(phone: str):
-    con = duckdb.connect()
-    try:
-        con.register_filesystem(_FS)
-        con.execute("SET threads=4")
-        con.execute("SET enable_progress_bar=false")
-        con.execute("SET preserve_insertion_order=false")
-
-        # MAX() NULL ignore karta hai -> best filled value per column
-        query = """
-            SELECT
-                MAX("mobile")  AS "mobile",
-                MAX("name")    AS "name",
-                MAX("fname")   AS "fname",
-                MAX("address") AS "address",
-                MAX("alt")     AS "alt",
-                MAX("circle")  AS "circle",
-                MAX("id")      AS "id",
-                MAX("email")   AS "email"
-            FROM read_parquet(?)
-            WHERE CAST("mobile" AS VARCHAR) = ?
-        """
-
-        row = con.execute(query, [PARQUET_PATH, str(phone)]).fetchone()
-
-        if row is None:
-            return []
-
-        columns = ["mobile", "name", "fname", "address", "alt", "circle", "id", "email"]
-        item = dict(zip(columns, row))
-
-        if all(v is None for v in item.values()):
-            return []
-
-        for k in columns:
-            if item[k] is None:
-                item[k] = ""
-
-        return [item]
-
-    finally:
-        con.close()
+_con = None
 
 
-# ============================================================
-# ROUTES
-# ============================================================
+def _get_con():
+    global _con
+    if _con is not None:
+        return _con
+
+    # ✅ only global-safe options in config
+    con = duckdb.connect(database=":memory:", config={
+        "threads": "1",
+        "preserve_insertion_order": "false",
+    })
+
+    # ✅ session-local options go through SET, not config
+    con.execute("SET enable_progress_bar = false")
+
+    con.register_filesystem(_FS)
+    _con = con
+    return con
+
+
+QUERY = """
+    SELECT
+        MAX("mobile")  AS "mobile",
+        MAX("name")    AS "name",
+        MAX("fname")   AS "fname",
+        MAX("address") AS "address",
+        MAX("alt")     AS "alt",
+        MAX("circle")  AS "circle",
+        MAX("id")      AS "id",
+        MAX("email")   AS "email"
+    FROM read_parquet(?)
+    WHERE CAST("mobile" AS VARCHAR) = ?
+"""
+
+COLS = ["mobile", "name", "fname", "address", "alt", "circle", "id", "email"]
+
 
 @app.get("/")
 def root():
-    return {
-        "status": "online",
-        "api": "Num Info API",
-        "dataset": DATASET,
-        "file": PARQUET_PATH,
-        "workers": WORKERS,
-        "search": "/search?phone=9999999891"
-    }
+    return {"status": "online"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "dataset": DATASET, "workers": WORKERS}
+    return {"status": "ok"}
 
 
 @app.get("/search")
-async def search(
-    phone: str = Query(..., description="Mobile number"),
-):
+def search(phone: str = Query(..., description="Mobile number")):
     phone = str(phone).strip()
     if not phone:
         return {"success": False, "query": phone, "count": 0,
                 "results": [], "error": "Phone number is required"}
 
     try:
-        loop = asyncio.get_running_loop()
-        results = await loop.run_in_executor(POOL, search_phone, phone)
-        return {
-            "success": bool(results),
-            "query": phone,
-            "count": len(results),
-            "results": results
-        }
+        row = _get_con().execute(QUERY, [HF_PARQUET, phone]).fetchone()
+
+        if not row or all(v is None for v in row):
+            return {"success": False, "query": phone, "count": 0, "results": []}
+
+        item = {k: (v if v is not None else "") for k, v in zip(COLS, row)}
+        return {"success": True, "query": phone, "count": 1, "results": [item]}
+
     except Exception as e:
+        traceback.print_exc()
         return {"success": False, "query": phone, "count": 0,
                 "results": [], "error": str(e)}
