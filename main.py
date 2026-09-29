@@ -1,14 +1,23 @@
 # api/index.py
 import os
 import traceback
-from fastapi import FastAPI, Query
-import duckdb
-from huggingface_hub import HfFileSystem
+from pathlib import Path
+
+CACHE_DIR = Path("/tmp")
+CACHE_DIR.mkdir(exist_ok=True)
+
+try:
+    from fastapi import FastAPI, Query
+    import duckdb
+    from huggingface_hub import HfFileSystem
+except Exception:
+    traceback.print_exc()
+    raise
 
 app = FastAPI()
 
-HF_DB  = "hf://datasets/bitaimkingfree/num-info-only/numinfo.duckdb"
-_FS    = HfFileSystem()
+HF_PARQUET = "hf://datasets/bitaimkingfree/num-info-only/users_data.parquet"
+_FS = HfFileSystem()
 
 _con = None
 
@@ -18,22 +27,32 @@ def _get_con():
     if _con is not None:
         return _con
 
-    con = duckdb.connect(":memory:", config={"threads": "1"})
+    # ✅ only global-safe options in config
+    con = duckdb.connect(database=":memory:", config={
+        "threads": "1",
+        "preserve_insertion_order": "false",
+    })
+
+    # ✅ session-local options go through SET, not config
     con.execute("SET enable_progress_bar = false")
+
     con.register_filesystem(_FS)
-
-    # attach remote duckdb READ_ONLY — DuckDB fetches only needed pages
-    con.execute(f"ATTACH '{HF_DB}' AS num (READ_ONLY)")
-
     _con = con
     return con
 
 
 QUERY = """
-    SELECT mobile, name, fname, address, alt, circle, id, email
-    FROM num.users
-    WHERE mobile = ?
-    LIMIT 1
+    SELECT
+        MAX("mobile")  AS "mobile",
+        MAX("name")    AS "name",
+        MAX("fname")   AS "fname",
+        MAX("address") AS "address",
+        MAX("alt")     AS "alt",
+        MAX("circle")  AS "circle",
+        MAX("id")      AS "id",
+        MAX("email")   AS "email"
+    FROM read_parquet(?)
+    WHERE CAST("mobile" AS VARCHAR) = ?
 """
 
 COLS = ["mobile", "name", "fname", "address", "alt", "circle", "id", "email"]
@@ -57,9 +76,9 @@ def search(phone: str = Query(..., description="Mobile number")):
                 "results": [], "error": "Phone number is required"}
 
     try:
-        row = _get_con().execute(QUERY, [phone]).fetchone()
+        row = _get_con().execute(QUERY, [HF_PARQUET, phone]).fetchone()
 
-        if not row:
+        if not row or all(v is None for v in row):
             return {"success": False, "query": phone, "count": 0, "results": []}
 
         item = {k: (v if v is not None else "") for k, v in zip(COLS, row)}
