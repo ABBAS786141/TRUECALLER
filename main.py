@@ -4,67 +4,59 @@ import duckdb
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
-app = FastAPI(title="Truecaller API")
+app = FastAPI(title="Num Info API")
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-DATASET = "wannabeyour/truecallerdata"
+DATASET = "bitaimkingfree/num-info-only"
 
-PARQUET_FILES = [
-    "hf://datasets/wannabeyour/truecallerdata/final_combined_data.parquet",
-    "hf://datasets/wannabeyour/truecallerdata/combined_truecaller_data.parquet",
-    "hf://datasets/wannabeyour/truecallerdata/combined_selected_columns.parquet",
-]
+# Single parquet file
+PARQUET_PATH = "hf://datasets/bitaimkingfree/num-info-only/users_data.parquet"
 
 WORKERS = 35
-
 POOL = ThreadPoolExecutor(max_workers=WORKERS)
 
-# One shared HfFileSystem instance (auth + session reuse)
+# One shared HfFileSystem instance
 _FS = HfFileSystem()
 
+
 # ============================================================
-# FAST SEARCH (merged best record)
+# SEARCH
 # ============================================================
 
 def search_phone(phone: str):
-
     con = duckdb.connect()
-
     try:
         con.register_filesystem(_FS)
-
-        # Speed tweaks
         con.execute("SET threads=4")
         con.execute("SET enable_progress_bar=false")
         con.execute("SET preserve_insertion_order=false")
 
-        # MAX() ignores NULLs -> gives best non-empty value per column
+        # MAX() NULL ignore karta hai -> best filled value per column
         query = """
             SELECT
-                MAX("Number")  AS "Number",
-                MAX("Name")    AS "Name",
-                MAX("Gender")  AS "Gender",
-                MAX("Address") AS "Address",
-                MAX("Email")   AS "Email"
-            FROM read_parquet(?, union_by_name=true)
-            WHERE CAST("Number" AS VARCHAR) = ?
+                MAX("mobile")  AS "mobile",
+                MAX("name")    AS "name",
+                MAX("fname")   AS "fname",
+                MAX("address") AS "address",
+                MAX("alt")     AS "alt",
+                MAX("circle")  AS "circle",
+                MAX("id")      AS "id",
+                MAX("email")   AS "email"
+            FROM read_parquet(?)
+            WHERE CAST("mobile" AS VARCHAR) = ?
         """
 
-        row = con.execute(
-            query,
-            [PARQUET_FILES, str(phone)]
-        ).fetchone()
+        row = con.execute(query, [PARQUET_PATH, str(phone)]).fetchone()
 
         if row is None:
             return []
 
-        columns = ["Number", "Name", "Gender", "Address", "Email"]
+        columns = ["mobile", "name", "fname", "address", "alt", "circle", "id", "email"]
         item = dict(zip(columns, row))
 
-        # If everything is NULL, no match
         if all(v is None for v in item.values()):
             return []
 
@@ -86,61 +78,37 @@ def search_phone(phone: str):
 def root():
     return {
         "status": "online",
-        "api": "Truecaller API",
+        "api": "Num Info API",
         "dataset": DATASET,
-        "files": len(PARQUET_FILES),
+        "file": PARQUET_PATH,
         "workers": WORKERS,
-        "search": "/search?phone=917207000711"
+        "search": "/search?phone=9999999891"
     }
 
 
 @app.get("/health")
 def health():
-    return {
-        "status": "ok",
-        "dataset": DATASET,
-        "files": len(PARQUET_FILES),
-        "workers": WORKERS
-    }
+    return {"status": "ok", "dataset": DATASET, "workers": WORKERS}
 
 
 @app.get("/search")
 async def search(
-    phone: str = Query(..., description="Phone number"),
+    phone: str = Query(..., description="Mobile number"),
 ):
-
     phone = str(phone).strip()
-
     if not phone:
-        return {
-            "success": False,
-            "query": phone,
-            "count": 0,
-            "results": [],
-            "error": "Phone number is required"
-        }
+        return {"success": False, "query": phone, "count": 0,
+                "results": [], "error": "Phone number is required"}
 
     try:
         loop = asyncio.get_running_loop()
-
-        results = await loop.run_in_executor(
-            POOL,
-            search_phone,
-            phone
-        )
-
+        results = await loop.run_in_executor(POOL, search_phone, phone)
         return {
             "success": bool(results),
             "query": phone,
             "count": len(results),
             "results": results
         }
-
     except Exception as e:
-        return {
-            "success": False,
-            "query": phone,
-            "count": 0,
-            "results": [],
-            "error": str(e)
-        }
+        return {"success": False, "query": phone, "count": 0,
+                "results": [], "error": str(e)}
