@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+duckdb>=1.4.0
+huggingface_hub>=1.5.0
+fsspec
