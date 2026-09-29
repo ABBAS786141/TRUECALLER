@@ -18,7 +18,7 @@ PARQUET_FILES = [
     "hf://datasets/wannabeyour/truecallerdata/combined_selected_columns.parquet",
 ]
 
-WORKERS = 200
+WORKERS = 35
 
 POOL = ThreadPoolExecutor(max_workers=WORKERS)
 
