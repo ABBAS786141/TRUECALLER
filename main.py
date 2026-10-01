@@ -21,38 +21,47 @@ _FS = HfFileSystem()
 
 _con = None
 
+# tune these based on your Vercel/container CPU
+THREADS = os.getenv("DUCKDB_THREADS", "2")
+
 
 def _get_con():
     global _con
     if _con is not None:
         return _con
 
-    # ✅ only global-safe options in config
     con = duckdb.connect(database=":memory:", config={
-        "threads": "1",
+        "threads": THREADS,
         "preserve_insertion_order": "false",
     })
 
-    # ✅ session-local options go through SET, not config
     con.execute("SET enable_progress_bar = false")
+    con.execute("SET enable_object_cache = true")
+    con.execute("SET parquet_metadata_cache = true")
+    con.execute("PRAGMA enable_optimizer")
 
     con.register_filesystem(_FS)
+
+    # Warm up: fetch schema + row group stats once so subsequent
+    # queries can prune row groups instead of re-reading metadata.
+    try:
+        con.execute(f"SELECT * FROM read_parquet('{HF_PARQUET}') LIMIT 0").fetchall()
+    except Exception:
+        traceback.print_exc()
+
     _con = con
     return con
 
 
+# Push the filter down to parquet scan; only LIMIT 1.
+# No aggregation — that's what was killing you.
 QUERY = """
     SELECT
-        MAX("mobile")  AS "mobile",
-        MAX("name")    AS "name",
-        MAX("fname")   AS "fname",
-        MAX("address") AS "address",
-        MAX("alt")     AS "alt",
-        MAX("circle")  AS "circle",
-        MAX("id")      AS "id",
-        MAX("email")   AS "email"
+        "mobile", "name", "fname", "address",
+        "alt", "circle", "id", "email"
     FROM read_parquet(?)
-    WHERE CAST("mobile" AS VARCHAR) = ?
+    WHERE "mobile" = ?
+    LIMIT 1
 """
 
 COLS = ["mobile", "name", "fname", "address", "alt", "circle", "id", "email"]
